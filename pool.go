@@ -13,6 +13,7 @@ import (
 
 // ErrExceeded is the error when maximum number of connections exceeded
 var ErrExceeded = errors.New("Maximum number of connections exceeded")
+var ErrUnavailable = errors.New("No available connection")
 
 type GRPCPool struct {
 	host        string
@@ -134,8 +135,8 @@ func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
 
 		select {
 		case c := <-connections:
-			// Getting connection from buffered channel
 
+			// Getting connection from buffered channel
 			if !pool.checkConnectionState(c.connection) {
 				continue
 			}
@@ -144,6 +145,19 @@ func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
 			pool.connections <- c
 
 			return c.connection, nil
+		default:
+
+			// No available connection, so creating a new connection
+			c, err := pool.factory()
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+
+			pool.Push(c)
+
+			// No available connection
+			return nil, ErrUnavailable
 		}
 	}
 }
@@ -159,14 +173,11 @@ func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
 
 		select {
 		case c := <-connections:
-			// Getting connection from buffered channel
 
+			// Getting connection from buffered channel
 			if !pool.checkConnectionState(c.connection) {
 				continue
 			}
-
-			// Put connection back to pool
-			pool.connections <- c
 
 			return c.connection, nil
 		default:
@@ -179,6 +190,9 @@ func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
 			}
 
 			pool.Push(c)
+
+			// No available connection
+			return nil, ErrUnavailable
 		}
 	}
 }
