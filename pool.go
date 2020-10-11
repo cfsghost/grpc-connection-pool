@@ -3,7 +3,7 @@ package grpc_connection_pool
 import (
 	"context"
 	"errors"
-	"sync"
+	"sync/atomic"
 
 	"log"
 
@@ -22,8 +22,6 @@ type GRPCPool struct {
 	connections chan *Connection
 	pending     chan *grpc.ClientConn
 	connCount   uint32
-
-	mutex sync.RWMutex
 }
 
 // NewGRPCPool creates a new connection pool.
@@ -64,28 +62,21 @@ func (pool *GRPCPool) init() error {
 
 func (pool *GRPCPool) ref() (uint32, error) {
 
-	pool.mutex.Lock()
+	count := atomic.LoadUint32((*uint32)(&pool.connCount))
 
 	// Check pool size
-	if pool.connCount >= uint32(pool.options.MaxCap) {
-		pool.mutex.Unlock()
-		return pool.connCount, ErrExceeded
+	if count >= uint32(pool.options.MaxCap) {
+		return count, ErrExceeded
 	}
 
 	// Update counter
-	pool.connCount++
+	count = atomic.AddUint32((*uint32)(&pool.connCount), 1)
 
-	pool.mutex.Unlock()
-
-	return pool.connCount, nil
+	return count, nil
 }
 
 func (pool *GRPCPool) unref() (uint32, error) {
-	pool.mutex.Lock()
-	pool.connCount--
-	pool.mutex.Unlock()
-
-	return pool.connCount, nil
+	return atomic.AddUint32((*uint32)(&pool.connCount), ^uint32(0)), nil
 }
 
 func (pool *GRPCPool) factory() (*grpc.ClientConn, error) {
@@ -127,14 +118,10 @@ func (pool *GRPCPool) checkConnectionState(connection *grpc.ClientConn) bool {
 // Get will returns a available gRPC client.
 func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
 
-	pool.mutex.Lock()
-	connections := pool.connections
-	pool.mutex.Unlock()
-
 	for {
 
 		select {
-		case c := <-connections:
+		case c := <-pool.connections:
 
 			// Getting connection from buffered channel
 			if !pool.checkConnectionState(c.connection) {
@@ -165,14 +152,10 @@ func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
 // Pop will return a availabe gRPC client and the gRPC client will not be reused before return client to the pool.
 func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
 
-	pool.mutex.Lock()
-	connections := pool.connections
-	pool.mutex.Unlock()
-
 	for {
 
 		select {
-		case c := <-connections:
+		case c := <-pool.connections:
 
 			// Getting connection from buffered channel
 			if !pool.checkConnectionState(c.connection) {
