@@ -5,8 +5,6 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"log"
-
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
@@ -20,7 +18,6 @@ type GRPCPool struct {
 	options     *Options
 	dialOptions []grpc.DialOption
 	connections chan *Connection
-	pending     chan *grpc.ClientConn
 	connCount   uint32
 }
 
@@ -60,9 +57,13 @@ func (pool *GRPCPool) init() error {
 	return nil
 }
 
+func (pool *GRPCPool) getConnectionCount() uint32 {
+	return atomic.LoadUint32((*uint32)(&pool.connCount))
+}
+
 func (pool *GRPCPool) ref() (uint32, error) {
 
-	count := atomic.LoadUint32((*uint32)(&pool.connCount))
+	count := pool.getConnectionCount()
 
 	// Check pool size
 	if count >= uint32(pool.options.MaxCap) {
@@ -137,14 +138,21 @@ func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
 			// No available connection, so creating a new connection
 			c, err := pool.factory()
 			if err != nil {
-				log.Println(err)
+
+				// Cannnot establish more connection
+				if err == ErrExceeded {
+					continue
+				}
+
+				if pool.getConnectionCount() == uint32(0) {
+					// No available connection
+					return nil, ErrUnavailable
+				}
+
 				continue
 			}
 
 			pool.Push(c)
-
-			// No available connection
-			return nil, ErrUnavailable
 		}
 	}
 }
@@ -168,14 +176,12 @@ func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
 			// No available connection, so creating a new connection
 			c, err := pool.factory()
 			if err != nil {
-				log.Println(err)
-				continue
+
+				// No available connection
+				return nil, ErrUnavailable
 			}
 
 			pool.Push(c)
-
-			// No available connection
-			return nil, ErrUnavailable
 		}
 	}
 }
