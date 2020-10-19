@@ -3,6 +3,7 @@ package grpc_connection_pool
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 
 	"google.golang.org/grpc"
@@ -14,11 +15,12 @@ var ErrExceeded = errors.New("Maximum number of connections exceeded")
 var ErrUnavailable = errors.New("No available connection")
 
 type GRPCPool struct {
-	host        string
-	options     *Options
-	dialOptions []grpc.DialOption
-	connections chan *Connection
-	connCount   uint32
+	host               string
+	options            *Options
+	dialOptions        []grpc.DialOption
+	connections        chan *Connection
+	connCount          uint32
+	streamInitializers sync.Map
 }
 
 // NewGRPCPool creates a new connection pool.
@@ -51,7 +53,7 @@ func (pool *GRPCPool) init() error {
 			return err
 		}
 
-		pool.connections <- NewConnection(connection)
+		pool.connections <- NewConnection(pool, connection)
 	}
 
 	return nil
@@ -116,8 +118,7 @@ func (pool *GRPCPool) checkConnectionState(connection *grpc.ClientConn) bool {
 	return true
 }
 
-// Get will returns a available gRPC client.
-func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
+func (pool *GRPCPool) get() (*Connection, error) {
 
 	for {
 
@@ -132,7 +133,7 @@ func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
 			// Put connection back to pool immediately
 			pool.connections <- c
 
-			return c.connection, nil
+			return c, nil
 		default:
 
 			// No available connection, so creating a new connection
@@ -157,8 +158,7 @@ func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
 	}
 }
 
-// Pop will return a availabe gRPC client and the gRPC client will not be reused before return client to the pool.
-func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
+func (pool *GRPCPool) pop() (*Connection, error) {
 
 	for {
 
@@ -170,15 +170,22 @@ func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
 				continue
 			}
 
-			return c.connection, nil
+			return c, nil
 		default:
 
 			// No available connection, so creating a new connection
 			c, err := pool.factory()
 			if err != nil {
 
-				// No available connection
-				return nil, ErrUnavailable
+				// Cannnot establish more connection
+				if err == ErrExceeded {
+					continue
+				}
+
+				if pool.getConnectionCount() == uint32(0) {
+					// No available connection
+					return nil, ErrUnavailable
+				}
 			}
 
 			pool.Push(c)
@@ -186,13 +193,40 @@ func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
 	}
 }
 
-// Push will put gRPC client to the pool.
-func (pool *GRPCPool) Push(connection *grpc.ClientConn) error {
+func (pool *GRPCPool) push(connection *Connection) error {
 
-	if !pool.checkConnectionState(connection) {
+	if !pool.checkConnectionState(connection.connection) {
 		return nil
 	}
 
-	pool.connections <- NewConnection(connection)
+	pool.connections <- connection
+
 	return nil
+}
+
+// Get will returns a available gRPC client.
+func (pool *GRPCPool) Get() (*grpc.ClientConn, error) {
+
+	conn, err := pool.get()
+	if err != nil {
+		return nil, err
+	}
+
+	return conn.connection, nil
+}
+
+// Pop will return a availabe gRPC client and the gRPC client will not be reused before return client to the pool.
+func (pool *GRPCPool) Pop() (*grpc.ClientConn, error) {
+
+	conn, err := pool.pop()
+	if err != nil {
+		return nil, err
+	}
+
+	return conn.connection, nil
+}
+
+// Push will put gRPC client to the pool.
+func (pool *GRPCPool) Push(connection *grpc.ClientConn) error {
+	return pool.push(NewConnection(pool, connection))
 }
