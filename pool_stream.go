@@ -13,12 +13,12 @@ func (pool *GRPCPool) GetStreamInitializer(name string) StreamInitializer {
 	return initializer.(StreamInitializer)
 }
 
-func (pool *GRPCPool) GetStream(name string) (interface{}, error) {
+func (pool *GRPCPool) GetStream(name string, fn StreamHandler) error {
 
 	conn, err := pool.get()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return conn.GetStream(name)
+	return conn.GetStream(name, fn)
 }

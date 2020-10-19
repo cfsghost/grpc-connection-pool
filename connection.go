@@ -2,6 +2,7 @@ package grpc_connection_pool
 
 import (
 	"errors"
+	"io"
 	"sync"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 )
 
 type StreamInitializer func(*grpc.ClientConn) (interface{}, error)
+type StreamHandler func(interface{}) error
 
 type Connection struct {
 	pool        *GRPCPool
@@ -26,26 +28,41 @@ func NewConnection(pool *GRPCPool, c *grpc.ClientConn) *Connection {
 	}
 }
 
-func (connection *Connection) GetStream(name string) (interface{}, error) {
+func (connection *Connection) GetStream(name string, fn StreamHandler) error {
 
 	// Getting stream by connection
 	val, ok := connection.streams.Load(name)
 	if ok {
-		return val, nil
+		err := fn(val)
+		if err == io.EOF {
+			connection.streams.Delete(name)
+			return connection.GetStream(name, fn)
+		}
+
+		if err != nil {
+			return err
+		}
 	}
 
 	// Initialize stream for connection
 	initializer := connection.pool.GetStreamInitializer(name)
 	if initializer == nil {
-		return nil, errors.New("No such stream initializer")
+		return errors.New("No such stream initializer")
 	}
 
 	stream, err := initializer(connection.connection)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	connection.streams.Store(name, stream)
+	if stream == nil {
+		return errors.New("Invalid stream")
+	}
 
-	return stream, nil
+	err = fn(stream)
+	if err != io.EOF {
+		connection.streams.Store(name, stream)
+	}
+
+	return err
 }
