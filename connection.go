@@ -39,9 +39,7 @@ func (connection *Connection) GetStream(name string, fn StreamHandler) error {
 			return connection.GetStream(name, fn)
 		}
 
-		if err != nil {
-			return err
-		}
+		return err
 	}
 
 	// Initialize stream for connection
